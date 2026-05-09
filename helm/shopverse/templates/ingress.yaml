@@ -1,0 +1,49 @@
+{{- if .Values.ingress.enabled }}
+{{- $frontendHosts := concat (list (.Values.frontend.ingressHost | default "")) (.Values.frontend.ingressExtraHosts | default (list)) | compact | uniq }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ .Values.ingress.name }}
+  labels:
+    app: shopverse
+  annotations:
+    kubernetes.io/ingress.class: {{ .Values.ingress.class | default "azure/application-gateway" | quote }}
+    {{- if .Values.ingress.staticIpName }}
+    appgw.ingress.kubernetes.io/static-ip: {{ .Values.ingress.staticIpName | quote }}
+    {{- end }}
+    {{- if .Values.ingress.wafPolicy }}
+    appgw.ingress.kubernetes.io/waf-policy-for-path: {{ .Values.ingress.wafPolicy | quote }}
+    {{- end }}
+    appgw.ingress.kubernetes.io/ssl-redirect: "true"
+    {{- with .Values.ingress.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  rules:
+    {{- range $frontendHosts }}
+    - host: {{ . | quote }}
+      http:
+        paths:
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $.Values.backend.serviceName }}
+                port:
+                  number: {{ $.Values.backend.servicePort }}
+          - path: /health
+            pathType: Exact
+            backend:
+              service:
+                name: {{ $.Values.backend.serviceName }}
+                port:
+                  number: {{ $.Values.backend.servicePort }}
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $.Values.frontend.serviceName }}
+                port:
+                  number: {{ $.Values.frontend.servicePort }}
+    {{- end }}
+{{- end }}

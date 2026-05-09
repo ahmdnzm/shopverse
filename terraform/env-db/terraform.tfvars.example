@@ -1,0 +1,7 @@
+resource_group_name      = "shopverse-rg"
+location                 = "southeastasia"
+project_name             = "shopverse"
+environment              = "dev"
+tf_state_storage_account = "shopversetfstate"
+tf_state_container       = "tfstate"
+key_vault_name           = "shopverse-dev-kv"

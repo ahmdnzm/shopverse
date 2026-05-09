@@ -1,0 +1,66 @@
+{{- if .Values.networkPolicy.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: shopverse-deny-all
+  labels:
+    app: shopverse
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: shopverse-frontend
+  labels:
+    app: shopverse
+    component: frontend
+spec:
+  podSelector:
+    matchLabels:
+      app: shopverse
+      component: frontend
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.ingress.namespace | default "kube-system" }} # Assuming AGIC is here or allow all for simplicity in this example
+      ports:
+        - protocol: TCP
+          port: 80
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: shopverse-backend
+  labels:
+    app: shopverse
+    component: backend
+spec:
+  podSelector:
+    matchLabels:
+      app: shopverse
+      component: backend
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: shopverse
+              component: frontend
+      ports:
+        - protocol: TCP
+          port: 8080
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.ingress.namespace | default "kube-system" }} # Allow health checks from AppGW
+      ports:
+        - protocol: TCP
+          port: 8080
+{{- end }}

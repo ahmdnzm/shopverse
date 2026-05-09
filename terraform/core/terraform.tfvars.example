@@ -1,0 +1,9 @@
+resource_group_name = "shopverse-rg"
+location            = "southeastasia"
+project_name        = "shopverse"
+github_repository   = "your-owner/shopverse-azure"
+node_count          = 3
+dns_domain          = "example.com"
+app_domain          = "shopverse.example.com"
+dev_domain          = "dev.shopverse.example.com"
+staging_domain      = "staging.shopverse.example.com"
