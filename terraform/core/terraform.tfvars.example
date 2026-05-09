@@ -1,0 +1,8 @@
+aws_region          = "ap-southeast-1"
+project_name        = "shopverse"
+github_repository   = "your-owner/shopverse"
+node_count          = 3
+dns_domain          = "example.com"
+app_domain          = "shopverse.example.com"
+dev_domain          = "dev.shopverse.example.com"
+staging_domain      = "staging.shopverse.example.com"

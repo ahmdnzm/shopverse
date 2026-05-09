@@ -1,0 +1,16 @@
+{{- if .Values.mysql.enabled }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: shopverse-mysql-pvc
+  labels:
+    app: shopverse
+    component: mysql
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: {{ .Values.mysql.storageClass }}
+  resources:
+    requests:
+      storage: {{ .Values.mysql.storage }}
+{{- end }}

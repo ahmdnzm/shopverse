@@ -1,0 +1,19 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: shopverse-config
+  labels:
+    app: shopverse
+data:
+  DB_HOST: {{ ternary "shopverse-mysql" .Values.database.host .Values.mysql.enabled | quote }}
+  DB_PORT: {{ ternary "3306" .Values.database.port .Values.mysql.enabled | quote }}
+  DB_NAME: {{ ternary .Values.mysql.database .Values.database.name .Values.mysql.enabled | quote }}
+  DB_USER: {{ ternary .Values.mysql.user .Values.database.user .Values.mysql.enabled | quote }}
+  DB_TLS: {{ ternary "false" .Values.database.tls .Values.mysql.enabled | quote }}
+  FRONTEND_ORIGIN: "*"
+  ENVIRONMENT: {{ .Values.observability.environment | quote }}
+  SERVICE_NAME: {{ .Values.observability.backend.serviceName | quote }}
+  LOG_FORMAT: {{ .Values.observability.backend.logFormat | quote }}
+  OTEL_SERVICE_NAME: {{ .Values.observability.backend.serviceName | quote }}
+  OTEL_RESOURCE_ATTRIBUTES: {{ .Values.observability.backend.tracing.resourceAttributes | quote }}
+  OTEL_EXPORTER_OTLP_ENDPOINT: {{ .Values.observability.backend.tracing.otlpEndpoint | quote }}

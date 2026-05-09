@@ -1,0 +1,44 @@
+{{- if .Values.ingress.enabled }}
+{{- $frontendHosts := concat (list (.Values.frontend.ingressHost | default "")) (.Values.frontend.ingressExtraHosts | default (list)) | compact | uniq }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ .Values.ingress.name }}
+  labels:
+    app: shopverse
+  annotations:
+    {{- with .Values.ingress.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  {{- if .Values.ingress.className }}
+  ingressClassName: {{ .Values.ingress.className | quote }}
+  {{- end }}
+  rules:
+    {{- range $frontendHosts }}
+    - host: {{ . | quote }}
+      http:
+        paths:
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $.Values.backend.serviceName }}
+                port:
+                  number: {{ $.Values.backend.servicePort }}
+          - path: /health
+            pathType: Exact
+            backend:
+              service:
+                name: {{ $.Values.backend.serviceName }}
+                port:
+                  number: {{ $.Values.backend.servicePort }}
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $.Values.frontend.serviceName }}
+                port:
+                  number: {{ $.Values.frontend.servicePort }}
+    {{- end }}
+{{- end }}

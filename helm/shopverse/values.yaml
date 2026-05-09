@@ -1,0 +1,119 @@
+# ──────────────────────────────────────
+# Frontend
+# ──────────────────────────────────────
+frontend:
+  deploymentName: shopverse-frontend
+  replicas: 2
+  image: ""  # frontend-image
+  serviceName: shopverse-frontend-svc
+  serviceType: ClusterIP
+  servicePort: 80
+  ingressHost: ""
+  ingressExtraHosts: []
+  hpa:
+    enabled: false
+    minReplicas: 2
+    maxReplicas: 5
+    targetCPUUtilizationPercentage: 80
+  pdb:
+    enabled: false
+    minAvailable: 1
+
+# ──────────────────────────────────────
+# Backend
+# ──────────────────────────────────────
+backend:
+  deploymentName: shopverse-backend
+  replicas: 2
+  image: ""  # backend-image
+  serviceName: shopverse-backend-svc
+  serviceType: ClusterIP
+  servicePort: 8080
+  ingressHost: ""
+  ingressExtraHosts: []
+  hpa:
+    enabled: false
+    minReplicas: 2
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 80
+  pdb:
+    enabled: false
+    minAvailable: 1
+
+# ──────────────────────────────────────
+# Observability
+# ──────────────────────────────────────
+observability:
+  environment: local
+  backend:
+    serviceName: shopverse-backend
+    logFormat: json
+    metrics:
+      enabled: true
+      path: /metrics
+      interval: 30s
+    tracing:
+      enabled: true
+      otlpEndpoint: ""
+      resourceAttributes: ""
+
+# ──────────────────────────────────────
+# Database
+# ──────────────────────────────────────
+database:
+  host: ""
+  port: "3306"
+  name: shopverse
+  user: shopverse
+  tls: "true"
+  password: ""
+  existingSecret: shopverse-secret
+  passwordKey: DB_PASSWORD
+
+# ──────────────────────────────────────
+# Security
+# ──────────────────────────────────────
+networkPolicy:
+  enabled: false
+
+serviceAccount:
+  create: false
+  name: shopverse-backend
+  annotations: {}
+
+secret:
+  create: false
+  name: shopverse-secret
+
+secretProvider:
+  enabled: false
+  provider: aws
+  name: shopverse-secrets
+  secrets: [] # array of { name: string, secretArn: string }
+
+mysql:
+  enabled: false
+  database: shopverse
+  user: shopverse
+  rootPassword: ""
+  password: ""
+  storage: 5Gi
+  storageClass: default
+  resources:
+    limits:
+      memory: "512Mi"
+      cpu: "500m"
+    requests:
+      memory: "256Mi"
+      cpu: "250m"
+
+# ──────────────────────────────────────
+# Shared
+# ──────────────────────────────────────
+ingress:
+  enabled: false
+  name: shopverse-ingress
+  className: alb
+  annotations: {}
+
+jwtSecret: ""

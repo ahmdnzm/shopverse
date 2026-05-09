@@ -1,0 +1,466 @@
+name: ShopVerse CI/CD
+
+on:
+  push:
+    branches: [develop, staging, main]
+    paths-ignore:
+      - "helm/shopverse/values-dev.yaml"
+      - "helm/shopverse/values-staging.yaml"
+      - "helm/shopverse/values-prod.yaml"
+      - "argocd/**"
+
+permissions:
+  contents: write
+  id-token: write
+
+env:
+  AWS_REGION: ${{ secrets.AWS_REGION || 'ap-southeast-1' }}
+  TF_STATE_BUCKET: ${{ secrets.TF_STATE_BUCKET || 'shopverse-tfstate' }}
+  CLUSTER_NAME: ${{ secrets.CLUSTER_NAME || 'shopverse-cluster' }}
+  PROJECT_NAME: shopverse
+
+jobs:
+  setup:
+    name: Resolve Environment
+    runs-on: ubuntu-latest
+    outputs:
+      deploy_env: ${{ steps.env.outputs.deploy_env }}
+      namespace: ${{ steps.env.outputs.namespace }}
+      values_file: ${{ steps.env.outputs.values_file }}
+      argo_app: ${{ steps.env.outputs.argo_app }}
+      argo_app_manifest: ${{ steps.env.outputs.argo_app_manifest }}
+    steps:
+      - name: Map branch to environment
+        id: env
+        run: |
+          case "${GITHUB_REF_NAME}" in
+            develop)
+              echo "deploy_env=dev" >> "$GITHUB_OUTPUT"
+              echo "namespace=shopverse-dev" >> "$GITHUB_OUTPUT"
+              echo "values_file=helm/shopverse/values-dev.yaml" >> "$GITHUB_OUTPUT"
+              echo "argo_app=shopverse-dev" >> "$GITHUB_OUTPUT"
+              echo "argo_app_manifest=argocd/shopverse-dev-application.yaml" >> "$GITHUB_OUTPUT"
+              ;;
+            staging)
+              echo "deploy_env=staging" >> "$GITHUB_OUTPUT"
+              echo "namespace=shopverse-staging" >> "$GITHUB_OUTPUT"
+              echo "values_file=helm/shopverse/values-staging.yaml" >> "$GITHUB_OUTPUT"
+              echo "argo_app=shopverse-staging" >> "$GITHUB_OUTPUT"
+              echo "argo_app_manifest=argocd/shopverse-staging-application.yaml" >> "$GITHUB_OUTPUT"
+              ;;
+            main)
+              echo "deploy_env=prod" >> "$GITHUB_OUTPUT"
+              echo "namespace=shopverse" >> "$GITHUB_OUTPUT"
+              echo "values_file=helm/shopverse/values-prod.yaml" >> "$GITHUB_OUTPUT"
+              echo "argo_app=shopverse" >> "$GITHUB_OUTPUT"
+              echo "argo_app_manifest=argocd/shopverse-prod-application.yaml" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "Unsupported branch: ${GITHUB_REF_NAME}" >&2
+              exit 1
+              ;;
+          esac
+
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    needs: setup
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+
+      - name: Update go.sum
+        working-directory: ./backend
+        run: go mod tidy
+
+      - name: Run Go tests
+        working-directory: ./backend
+        run: go test ./...
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "18"
+
+      - name: Install frontend dependencies
+        working-directory: ./frontend
+        run: npm install
+
+      - name: Run frontend lint
+        working-directory: ./frontend
+        run: npx eslint . --ext js,jsx --report-unused-disable-directives --max-warnings 0 --config .eslintrc.cjs
+
+  security-scan:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build frontend image
+        run: docker build -t shopverse-frontend:scan ./frontend
+
+      - name: Build backend image
+        run: docker build -t shopverse-backend:scan ./backend
+
+      - name: Install Trivy
+        run: |
+          sudo apt-get install -y wget apt-transport-https gnupg
+          wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | gpg --dearmor | sudo tee /usr/share/keyrings/trivy.gpg > /dev/null
+          echo "deb [signed-by=/usr/share/keyrings/trivy.gpg] https://aquasecurity.github.io/trivy-repo/deb generic main" | sudo tee /etc/apt/sources.list.d/trivy.list
+          sudo apt-get update -q
+          sudo apt-get install -y trivy
+
+      - name: Run Trivy scan on frontend
+        run: trivy image --exit-code 1 --severity CRITICAL --ignore-unfixed --format table shopverse-frontend:scan
+
+      - name: Run Trivy scan on backend
+        run: trivy image --exit-code 1 --severity CRITICAL --ignore-unfixed --format table shopverse-backend:scan
+
+  provision-core:
+    name: Provision Shared AWS Core
+    runs-on: ubuntu-latest
+    needs: setup
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_GITHUB_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Ensure S3 state bucket exists
+        run: |
+          if ! aws s3api head-bucket --bucket "${{ env.TF_STATE_BUCKET }}" 2>/dev/null; then
+            aws s3api create-bucket --bucket "${{ env.TF_STATE_BUCKET }}" --region "${{ env.AWS_REGION }}" --create-bucket-configuration LocationConstraint="${{ env.AWS_REGION }}"
+          fi
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.7.0"
+          terraform_wrapper: false
+
+      - name: Terraform Init Core
+        working-directory: ./terraform/core
+        run: |
+          terraform init \
+            -backend-config="bucket=${{ env.TF_STATE_BUCKET }}" \
+            -backend-config="key=core" \
+            -backend-config="region=${{ env.AWS_REGION }}"
+
+      - name: Terraform Plan Core
+        working-directory: ./terraform/core
+        run: |
+          terraform plan \
+            -var="aws_region=${{ env.AWS_REGION }}" \
+            -var="cluster_name=${CLUSTER_NAME}" \
+            -var="project_name=${PROJECT_NAME}" \
+            -var="environment=shared" \
+            -var="github_repository=${GITHUB_REPOSITORY}" \
+            -var="node_count=3" \
+            -out=tfplan
+
+      - name: Terraform Apply Core
+        working-directory: ./terraform/core
+        run: terraform apply -auto-approve tfplan
+
+  build-and-push:
+    name: Build, Tag & Push Images
+    runs-on: ubuntu-latest
+    needs: [setup, security-scan, provision-core]
+    env:
+      DEPLOY_ENV: ${{ needs.setup.outputs.deploy_env }}
+    outputs:
+      frontend_image: ${{ steps.images.outputs.frontend_image }}
+      backend_image: ${{ steps.images.outputs.backend_image }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_GITHUB_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Resolve image names
+        id: images
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        run: |
+          FRONTEND_IMAGE="${ECR_REGISTRY}/${PROJECT_NAME}-frontend:${DEPLOY_ENV}-${GITHUB_SHA}"
+          BACKEND_IMAGE="${ECR_REGISTRY}/${PROJECT_NAME}-backend:${DEPLOY_ENV}-${GITHUB_SHA}"
+          echo "frontend_image=${FRONTEND_IMAGE}" >> "$GITHUB_OUTPUT"
+          echo "backend_image=${BACKEND_IMAGE}" >> "$GITHUB_OUTPUT"
+          echo "ecr_registry=${ECR_REGISTRY}" >> "$GITHUB_ENV"
+
+      - name: Build and push images
+        run: |
+          docker build -t "${{ steps.images.outputs.frontend_image }}" ./frontend
+          docker build -t "${{ steps.images.outputs.backend_image }}" ./backend
+          docker push "${{ steps.images.outputs.frontend_image }}"
+          docker push "${{ steps.images.outputs.backend_image }}"
+          if [ "${DEPLOY_ENV}" = "prod" ]; then
+            docker tag "${{ steps.images.outputs.frontend_image }}" "${{ env.ecr_registry }}/${PROJECT_NAME}-frontend:latest"
+            docker tag "${{ steps.images.outputs.backend_image }}" "${{ env.ecr_registry }}/${PROJECT_NAME}-backend:latest"
+            docker push "${{ env.ecr_registry }}/${PROJECT_NAME}-frontend:latest"
+            docker push "${{ env.ecr_registry }}/${PROJECT_NAME}-backend:latest"
+          fi
+
+  deploy:
+    name: Provision AWS & Publish GitOps State
+    runs-on: ubuntu-latest
+    needs: [setup, provision-core, build-and-push]
+    env:
+      DEPLOY_ENV: ${{ needs.setup.outputs.deploy_env }}
+      NAMESPACE: ${{ needs.setup.outputs.namespace }}
+      VALUES_FILE: ${{ needs.setup.outputs.values_file }}
+      ARGO_APP: ${{ needs.setup.outputs.argo_app }}
+      ARGO_APP_MANIFEST: ${{ needs.setup.outputs.argo_app_manifest }}
+      FRONTEND_IMAGE: ${{ needs.build-and-push.outputs.frontend_image }}
+      BACKEND_IMAGE: ${{ needs.build-and-push.outputs.backend_image }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_GITHUB_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.7.0"
+          terraform_wrapper: false
+
+      - name: Terraform Init Environment RDS
+        working-directory: ./terraform/env-rds
+        run: |
+          terraform init \
+            -backend-config="bucket=${{ env.TF_STATE_BUCKET }}" \
+            -backend-config="key=rds.${DEPLOY_ENV}" \
+            -backend-config="region=${{ env.AWS_REGION }}" \
+            -reconfigure
+
+      - name: Terraform Plan Environment RDS
+        working-directory: ./terraform/env-rds
+        run: |
+          terraform plan \
+            -var="aws_region=${{ env.AWS_REGION }}" \
+            -var="project_name=${PROJECT_NAME}" \
+            -var="environment=${DEPLOY_ENV}" \
+            -var="tf_state_bucket=${{ env.TF_STATE_BUCKET }}" \
+            -out=tfplan
+
+      - name: Terraform Apply Environment RDS
+        working-directory: ./terraform/env-rds
+        run: terraform apply -auto-approve tfplan
+
+      - name: Update kubeconfig
+        run: aws eks update-kubeconfig --region "${{ env.AWS_REGION }}" --name "${{ env.CLUSTER_NAME }}"
+
+      - name: Create target namespace
+        run: kubectl create namespace "${NAMESPACE}" --dry-run=client -o yaml | kubectl apply -f -
+
+      - name: Get ALB DNS Name
+        id: alb
+        run: |
+          # Wait for ALB to be created by Ingress Controller
+          echo "Waiting for ALB DNS name..."
+          for i in {1..30}; do
+            ALB_DNS=$(kubectl get ingress shopverse-ingress -n "${NAMESPACE}" -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
+            if [ -n "$ALB_DNS" ]; then
+              echo "ALB_DNS=$ALB_DNS" >> "$GITHUB_OUTPUT"
+              break
+            fi
+            sleep 10
+          done
+
+      - name: Terraform Provision CloudFront
+        if: steps.alb.outputs.ALB_DNS != ''
+        working-directory: ./terraform/env-rds
+        run: |
+          terraform apply -auto-approve \
+            -var="aws_region=${{ env.AWS_REGION }}" \
+            -var="project_name=${PROJECT_NAME}" \
+            -var="environment=${DEPLOY_ENV}" \
+            -var="tf_state_bucket=${{ env.TF_STATE_BUCKET }}" \
+            -var="alb_dns_name=${{ steps.alb.outputs.ALB_DNS }}"
+
+      - name: Read Terraform outputs
+        id: tf
+        run: |
+          echo "db_host=$(terraform -chdir=terraform/env-rds output -raw rds_hostname)" >> "$GITHUB_OUTPUT"
+          echo "db_port=$(terraform -chdir=terraform/env-rds output -raw rds_port)" >> "$GITHUB_OUTPUT"
+          echo "db_name=$(terraform -chdir=terraform/env-rds output -raw rds_db_name)" >> "$GITHUB_OUTPUT"
+          echo "db_user=$(terraform -chdir=terraform/env-rds output -raw rds_username)" >> "$GITHUB_OUTPUT"
+          echo "db_secret_arn=$(terraform -chdir=terraform/env-rds output -raw db_password_secret_arn)" >> "$GITHUB_OUTPUT"
+          echo "jwt_secret_arn=$(terraform -chdir=terraform/env-rds output -raw jwt_secret_arn)" >> "$GITHUB_OUTPUT"
+          echo "jwt_secret_name=$(terraform -chdir=terraform/env-rds output -raw jwt_secret_name)" >> "$GITHUB_OUTPUT"
+          echo "backend_role_arn=$(terraform -chdir=terraform/env-rds output -raw backend_secrets_role_arn)" >> "$GITHUB_OUTPUT"
+          echo "cloudfront_domain=$(terraform -chdir=terraform/env-rds output -raw cloudfront_domain_name)" >> "$GITHUB_OUTPUT"
+
+      - name: Store JWT secret in AWS Secrets Manager
+        run: |
+          echo "::add-mask::${{ secrets.JWT_SECRET }}"
+          aws secretsmanager put-secret-value --secret-id "${{ steps.tf.outputs.jwt_secret_name }}" \
+            --secret-string "${{ secrets.JWT_SECRET }}"
+
+      - name: Update GitOps values
+        env:
+          DB_HOST: ${{ steps.tf.outputs.db_host }}
+          DB_PORT: ${{ steps.tf.outputs.db_port }}
+          DB_NAME: ${{ steps.tf.outputs.db_name }}
+          DB_USER: ${{ steps.tf.outputs.db_user }}
+          DB_SECRET_ARN: ${{ steps.tf.outputs.db_secret_arn }}
+          JWT_SECRET_ARN: ${{ steps.tf.outputs.jwt_secret_arn }}
+          BACKEND_ROLE_ARN: ${{ steps.tf.outputs.backend_role_arn }}
+        run: |
+          python3 - <<'PY'
+          import os
+          import textwrap
+          from pathlib import Path
+
+          env_name = os.environ["DEPLOY_ENV"]
+          path = Path(os.environ["VALUES_FILE"])
+          host_map = {
+              "dev": "dev.shopverse.ahmdnzm.com",
+              "staging": "staging.shopverse.ahmdnzm.com",
+              "prod": "shopverse.ahmdnzm.com",
+          }
+          host = host_map[env_name]
+          path.write_text(textwrap.dedent(f"""\
+          # {env_name.title()} GitOps values managed by GitHub Actions and synced by Argo CD.
+          frontend:
+            image: {os.environ["FRONTEND_IMAGE"]}  # frontend-image
+            ingressHost: {host}
+            hpa:
+              enabled: { "true" if env_name == "prod" else "false" }
+            pdb:
+              enabled: { "true" if env_name == "prod" else "false" }
+
+          backend:
+            image: {os.environ["BACKEND_IMAGE"]}  # backend-image
+            ingressHost: {host}
+            hpa:
+              enabled: { "true" if env_name == "prod" else "false" }
+            pdb:
+              enabled: { "true" if env_name == "prod" else "false" }
+
+          database:
+            host: "{os.environ["DB_HOST"]}"
+            port: "{os.environ["DB_PORT"]}"
+            name: "{os.environ["DB_NAME"]}"
+            user: "{os.environ["DB_USER"]}"
+            tls: "true"
+            existingSecret: shopverse-secret
+            passwordKey: DB_PASSWORD
+
+          mysql:
+            enabled: false
+
+          serviceAccount:
+            create: true
+            name: shopverse-backend
+            annotations:
+              eks.amazonaws.com/role-arn: "{os.environ["BACKEND_ROLE_ARN"]}"
+
+          secret:
+            create: false
+            name: shopverse-secret
+
+          secretProvider:
+            enabled: true
+            provider: aws
+            secrets:
+              - name: DB_PASSWORD
+                secretArn: "{os.environ["DB_SECRET_ARN"]}"
+              - name: JWT_SECRET
+                secretArn: "{os.environ["JWT_SECRET_ARN"]}"
+
+          ingress:
+            enabled: true
+            class: alb
+            className: alb
+            annotations:
+              alb.ingress.kubernetes.io/scheme: internet-facing
+              alb.ingress.kubernetes.io/target-type: ip
+              alb.ingress.kubernetes.io/listen-ports: '[{{"HTTP": 80}}, {{"HTTPS":443}}]'
+              alb.ingress.kubernetes.io/ssl-redirect: '443'
+          
+          networkPolicy:
+            enabled: { "true" if env_name == "prod" else "false" }
+          """))
+          PY
+
+          echo "Updated ${VALUES_FILE}:"
+          cat "${VALUES_FILE}"
+
+      - name: Commit GitOps values
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "${VALUES_FILE}"
+          if git diff --cached --quiet; then
+            echo "No GitOps values changes to commit."
+          else
+            git commit -m "chore(gitops): deploy ${DEPLOY_ENV} ${GITHUB_SHA} [skip ci]"
+            git push origin "HEAD:${GITHUB_REF_NAME}"
+          fi
+
+      - name: Install Argo CD
+        run: |
+          kubectl create namespace argocd --dry-run=client -o yaml | kubectl apply -f -
+          kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
+          kubectl rollout status deployment/argocd-server -n argocd --timeout=300s
+
+      - name: Configure Argo CD repository credentials
+        env:
+          REPO_URL: https://github.com/${{ github.repository }}.git
+          ARGOCD_REPO_USERNAME: ${{ secrets.ARGOCD_REPO_USERNAME }}
+          ARGOCD_REPO_TOKEN: ${{ secrets.ARGOCD_REPO_TOKEN }}
+        run: |
+          if [ -z "${ARGOCD_REPO_TOKEN}" ]; then
+            echo "ARGOCD_REPO_TOKEN is not set; assuming Argo CD can read the repository anonymously."
+            exit 0
+          fi
+
+          kubectl create secret generic shopverse-repo \
+            -n argocd \
+            --from-literal=type=git \
+            --from-literal=url="${REPO_URL}" \
+            --from-literal=username="${ARGOCD_REPO_USERNAME:-x-access-token}" \
+            --from-literal=password="${ARGOCD_REPO_TOKEN}" \
+            --dry-run=client -o yaml | kubectl apply -f -
+          kubectl label secret shopverse-repo \
+            -n argocd \
+            argocd.argoproj.io/secret-type=repository \
+            --overwrite
+
+      - name: Apply Argo CD application
+        env:
+          REPO_URL: https://github.com/${{ github.repository }}.git
+        run: sed "s|\${REPO_URL}|${REPO_URL}|g" "${ARGO_APP_MANIFEST}" | kubectl apply -f -
+
+      - name: Verify deployment
+        run: |
+          echo "--- Argo CD Application ---"
+          kubectl get application "${ARGO_APP}" -n argocd -o yaml
+          echo "--- Pods (${NAMESPACE}) ---"
+          kubectl get pods -n "${NAMESPACE}"
+          echo "--- Services (${NAMESPACE}) ---"
+          kubectl get svc -n "${NAMESPACE}"
+          echo "--- Ingress (${NAMESPACE}) ---"
+          kubectl get ingress -n "${NAMESPACE}" 2>/dev/null || echo "No ingress configured"
