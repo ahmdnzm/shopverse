@@ -252,6 +252,8 @@ docker push ${REGISTRY}/shopverse-backend:${TAG}
 
 ### Step 5: Deploy with GitHub Actions and Argo CD
 
+The `terraform/core` stack automatically installs Argo CD, the AWS Load Balancer Controller, the Secrets Store CSI Driver, and CloudWatch Observability.
+
 Push to one of the deployment branches:
 
 ```bash

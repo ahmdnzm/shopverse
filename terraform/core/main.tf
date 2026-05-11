@@ -171,6 +171,16 @@ resource "aws_iam_role_policy_attachment" "nodes_AmazonEC2ContainerRegistryReadO
   role       = aws_iam_role.nodes.name
 }
 
+resource "aws_iam_role_policy_attachment" "nodes_CloudWatchAgentServerPolicy" {
+  policy_arn = "arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy"
+  role       = aws_iam_role.nodes.name
+}
+
+resource "aws_iam_role_policy_attachment" "nodes_AWSXrayWriteOnlyAccess" {
+  policy_arn = "arn:aws:iam::aws:policy/AWSXrayWriteOnlyAccess"
+  role       = aws_iam_role.nodes.name
+}
+
 resource "aws_eks_node_group" "this" {
   cluster_name    = aws_eks_cluster.this.name
   node_group_name = "default"
@@ -189,6 +199,8 @@ resource "aws_eks_node_group" "this" {
     aws_iam_role_policy_attachment.nodes_AmazonEKSWorkerNodePolicy,
     aws_iam_role_policy_attachment.nodes_AmazonEKS_CNI_Policy,
     aws_iam_role_policy_attachment.nodes_AmazonEC2ContainerRegistryReadOnly,
+    aws_iam_role_policy_attachment.nodes_CloudWatchAgentServerPolicy,
+    aws_iam_role_policy_attachment.nodes_AWSXrayWriteOnlyAccess,
   ]
 }
 

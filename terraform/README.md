@@ -25,7 +25,12 @@ aws s3api create-bucket --bucket shopverse-tfstate --region ap-southeast-1 --cre
 
 ## Shared Core
 
-Provision the shared VPC, EKS cluster, ECR repositories, Route 53 zone, and IAM OIDC Federation:
+Provision the shared VPC, EKS cluster, ECR repositories, Route 53 zone, and IAM OIDC Federation. This stack also automatically bootstraps the cluster with essential add-ons:
+- **Argo CD** (GitOps controller)
+- **AWS Load Balancer Controller** (Ingress management)
+- **Secrets Store CSI Driver** (Secrets Manager integration)
+- **Metrics Server** (Horizontal Pod Autoscaling)
+- **CloudWatch Observability** (Logs and metrics)
 
 ```bash
 terraform -chdir=terraform/core init \
